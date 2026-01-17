@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import typing
 import argparse
-import textwrap
-from pathlib import Path
-from shutil import which
-import os
-import sys
+import fcntl
 import getpass
-import time
-from curses.ascii import unctrl
-import subprocess
-
+import os
+import re
 import signal
 import struct
+import subprocess
+import sys
 import termios
-import fcntl
-
+import textwrap
+import time
+import typing
 from configparser import ConfigParser, ParsingError
-import re
+from curses.ascii import unctrl
+from pathlib import Path
+from shutil import which
 
 try:
     import pexpect
@@ -39,6 +37,10 @@ def get_bw_password(name: str, *, debug: bool = False) -> str | None:
     return bw.get_data('password')
 
 
+def print_unctrl_str(ctrl_str: str | bytes) -> str:
+    return ''.join([unctrl(c) for c in ctrl_str])
+
+
 class PtyInteract:
     def __init__(
         self,
@@ -48,10 +50,12 @@ class PtyInteract:
         use_bw: bool = False,
         timeout: int = 30,
         expect_config: typing.Mapping[str, str] | None = None,
-        copy_config: typing.Mapping[str, str] | None = None,
+        escape: str = '',
+        command_start: str = '',
+        command_end: str = '',
         debug: bool = False,
     ) -> None:
-        self.prompt = r'[$#>/%:](\s*|\x1b.*)$'
+        self.prompt = r'[$#>/%:](\s*|\s*\x1b.*)$'
 
         print(f'Connecting by: {command}')
         self.child = pexpect.spawn(command, timeout=timeout, encoding='utf8')
@@ -70,16 +74,10 @@ class PtyInteract:
             if self.expect_list and self.expect_list[0][0] == 'prompt':
                 self.prompt = self.expect_list[0][1]
                 self.expect_cursor = 1
-        self.escape = '\x1d'
+        self.escape = escape
         self.input_buffer = b''
-        self.input_detect_start = b'\x60\x60'
-        self.input_detect_end = b'\x09'
-        self.copy_config = copy_config
-        if self.copy_config:
-            if self.copy_config.get('start'):
-                self.input_detect_start = eval(self.copy_config.get('start', ''))
-            if self.copy_config.get('end'):
-                self.input_detect_end = eval(self.copy_config.get('end', ''))
+        self.command_start = command_start.encode()
+        self.command_end = command_end.encode()
         try:
             self.login()
         except KeyboardInterrupt:
@@ -92,7 +90,7 @@ class PtyInteract:
             result = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, buf)
             rows, cols = struct.unpack(fmt, result)
             return (rows, cols)
-        except (struct.error, TypeError, IOError, AttributeError):
+        except (OSError, struct.error, TypeError, AttributeError):
             pass
         return (None, None)
 
@@ -135,7 +133,9 @@ class PtyInteract:
         if isinstance(self.child.after, str):
             text_after = self.child.after
         if res == 0:
-            print(f'Escape: {unctrl(self.escape)}')
+            print(f'Escape: {print_unctrl_str(self.escape)}')
+            print(f'Command Start: {print_unctrl_str(self.command_start)}')
+            print(f'Command End: {print_unctrl_str(self.command_end)}')
             print('no propmt')
             self.start_interaction()
         elif res == 1:
@@ -163,7 +163,9 @@ class PtyInteract:
             print(text_after)
             self.login()
         elif res == 6:
-            print(f'Escape: {unctrl(self.escape)}')
+            print(f'Escape: {print_unctrl_str(self.escape)}')
+            print(f'Command Start: {print_unctrl_str(self.command_start)}')
+            print(f'Command End: {print_unctrl_str(self.command_end)}')
             print(text_before.strip(), end='')
             print(text_after, end='', flush=True)
             self.start_interaction()
@@ -188,6 +190,19 @@ class PtyInteract:
             output_filter=self.output_filter,
             input_filter=self.input_filter,
         )
+        if not self.child.isalive():
+            return
+        self.child.sendcontrol('c')
+        self.child.sendline()
+        self.child.sendline('exit')
+        self.child.expect(
+            [
+                pexpect.TIMEOUT,
+                pexpect.EOF,
+            ],
+            timeout=1,
+        )
+        print(self.child.before)
 
     def output_filter(self, data: bytes) -> bytes:
         if self.expect_list and self.expect_cursor < len(self.expect_list):
@@ -202,44 +217,42 @@ class PtyInteract:
     def input_filter(self, data: bytes) -> bytes:
         self.input_buffer += data
         if (
-            self.input_detect_start in self.input_buffer
-            and self.input_detect_end in self.input_buffer
-            and self.copy_config
+            self.command_start in self.input_buffer
+            and self.command_end in self.input_buffer
             and (
                 search := re.search(
-                    f'(?<={self.input_detect_start.decode("utf8")})([^{self.input_detect_start.decode("utf8")}]+)(?={self.input_detect_end.decode("utf8")})',
+                    f'(?<={self.command_start.decode("utf8")})([^{self.command_start.decode("utf8")}]+)(?={self.command_end.decode("utf8")})',
                     self.input_buffer.decode('utf8'),
                 )
             )
         ):
-            cfg_key = search[0]
+            local_cmd = search[0]
             if self.debug:
-                print(cfg_key)
-            if filepath := self.copy_config.get(cfg_key):
-                if sys.platform == 'linux':
-                    cmd = f'cat {filepath} | xsel -b'
-                elif (
-                    sys.platform == 'win32'
-                    or sys.platform == 'cygwin'
-                    or sys.platform == 'msys'
-                ):
-                    cmd = f'type {filepath} | clip'
-                elif sys.platform == 'darwin':
-                    cmd = f'cat {filepath} | pbcopy'
-                exec_out = subprocess.DEVNULL
-                if self.debug:
-                    exec_out = sys.stdout
-                subprocess.Popen(
-                    cmd,
-                    stdout=exec_out,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    shell=True,
-                )
-                os.write(self.child.child_fd, b'\x15')
-                self.input_buffer = b''
-                return b''
-        if data in [b'\x0d', b'\x03']:
+                print(local_cmd)
+            if sys.platform == 'linux':
+                cmd = f'{local_cmd} | xsel -b'
+            elif (
+                sys.platform == 'win32'
+                or sys.platform == 'cygwin'
+                or sys.platform == 'msys'
+            ):
+                cmd = f'{local_cmd} | clip'
+            elif sys.platform == 'darwin':
+                cmd = f'{local_cmd} | pbcopy'
+            exec_out = subprocess.DEVNULL
+            if self.debug:
+                exec_out = sys.stdout
+            subprocess.Popen(
+                cmd,
+                stdout=exec_out,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                shell=True,
+            )
+            os.write(self.child.child_fd, b'\x15')
+            self.input_buffer = b''
+            return b''
+        if data in [b'\x0d', b'\x0a', b'\x03']:
             self.input_buffer = b''
         return data
 
@@ -282,7 +295,7 @@ def generate_command(
     arg_list: list | None = None,
     connect_config: typing.Mapping[str, str] | None = None,
     extra: str | None = '',
-) -> tuple:
+) -> tuple[str, str]:
     conf_prog = ''
     conf_params = ''
     conf_extra = ''
@@ -312,10 +325,7 @@ def generate_command(
         conf_params = ''
         conf_extra = ''
     if not prog:
-        if conf_prog:
-            prog = conf_prog
-        else:
-            prog = 'ssh'
+        prog = conf_prog or 'ssh'
     extra = extra if extra else conf_extra
     return prog, f'{prog}{add_params}{conf_params}{parameters} {extra}'
 
@@ -329,7 +339,6 @@ def run(args: argparse.Namespace, arg_list: list) -> None:
         host = host_parsed[1]
     connect_config = LoadConfig(getattr(args, 'connect_config', None))
     expect_config = LoadConfig(getattr(args, 'expect_config', None))
-    copy_config = LoadConfig(getattr(args, 'copy_config', None))
     prog, command = generate_command(
         host,
         port=getattr(args, 'port', None),
@@ -348,7 +357,11 @@ def run(args: argparse.Namespace, arg_list: list) -> None:
         use_bw=USE_BW and which('bw') is not None,
         timeout=getattr(args, 'timeout', 10),
         expect_config=expect_config.get_config(host),
-        copy_config=copy_config.get_config(host),
+        escape=getattr(args, 'escape', '').encode().decode('unicode_escape'),
+        command_start=getattr(args, 'command_start', '')
+        .encode()
+        .decode('unicode_escape'),
+        command_end=getattr(args, 'command_end', '').encode().decode('unicode_escape'),
         debug=getattr(args, 'debug', False),
     )
 
@@ -378,11 +391,26 @@ def main() -> None:
         default=Path('~').expanduser() / '.ssh/expect.conf',
         help='config file for automation (default: %(default)s)',
     )
+    escape = '\x1d'
     parser.add_argument(
-        '--copy-config',
-        type=Path,
-        default=Path('~').expanduser() / '.ssh/copy.conf',
-        help='config file for automation (default: %(default)s)',
+        '--escape',
+        type=str,
+        default=escape,
+        help=f'escape character to send (default: {print_unctrl_str(escape)})',
+    )
+    command_start = '\x60\x60'
+    command_end = '\x09'
+    parser.add_argument(
+        '--command-start',
+        type=str,
+        default=command_start,
+        help=f'local command start for copy result (default: {print_unctrl_str(command_start)})',
+    )
+    parser.add_argument(
+        '--command-end',
+        type=str,
+        default=command_end,
+        help=f'local command end for copy result (default: {print_unctrl_str(command_end)})',
     )
     parser.add_argument(
         '--prog', type=str, default='', help='ssh program to use (default: ssh)'
