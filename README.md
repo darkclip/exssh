@@ -15,11 +15,13 @@ with bitwarden cli support:
 
 - `CONNECT_CONFIG` connection config file (default: ~/.ssh/connect.conf)
 - `EXPECT_CONFIG` expect config file (default: ~/.ssh/expect.conf)
-- `COPY_CONFIG` copy config file (default: ~/.ssh/copy.conf)
+- `ESCAPE` escape character to send (default: ^])
+- `COMMAND_START` local command start for copy result (default: ``)
+- `COMMAND_END` local command end for copy result (default: ^I)
 - `PROG` ssh client program (default: ssh)
 - `EXTRA` extra parameter for ssh client program
 
-`python3 -m exssh [-p PORT] [--timeout TIMEOUT] [--connect-config CONNECT_CONFIG] [--expect-config EXPECT_CONFIG] [--copy-config COPY_CONFIG] [--prog PROG] [--extra EXTRA] host`
+`python3 -m exssh [-h] [-p PORT] [--timeout TIMEOUT] [--connect-config CONNECT_CONFIG] [--expect-config EXPECT_CONFIG] [--escape ESCAPE] [--command-start COMMAND_START] [--command-end COMMAND_END] [--prog PROG] [--extra EXTRA] [--debug] host`
 
 ### CONNECT_CONFIG
 
@@ -36,7 +38,7 @@ prog=mosh
 ```
 
 - config section title is matching ssh host of ~/.ssh/config
-- prog and extra is the same of command argument
+- prog and extra are the same functions of command arguments
 - other configs are parameters specific to the choosing prog
 
 ### EXPECT_CONFIG
@@ -50,21 +52,14 @@ password = P@ssw0rd
 
 - config section title is matching ssh host of ~/.ssh/config
 - prompt is the indicator of successful connection in case not autodetected
-- other configs key is trigger keyword, value is auto fill response
+- other keys are trigger keywords, values are auto filled responses
 
-### COPY_CONFIG
+### Example
 
-```config
-[*]
-start=b'\x21\x21'
-end=b'\x26'
-sshid=~/.ssh/id_ed25519.pub
-hostname=/etc/hostname
+```bash
+python3 -m exssh --connect-config ~/.ssh/connect.conf --expect-config ~/.ssh/expect.conf --escape \\x1b --command-start \!\! --command-end \& ssh-host
 ```
 
-In this example, when connected in a session:
-type `!!sshid&` will copy content of `~/.ssh/id_ed25519.pub` into clipboard
-type `!!hostname&` will copy content of `/etc/hostname` into clipboard
-
-if `start` not defined, default to `\x60\x60`
-if `end` not defined, default to `\x09`
+In this example, when connected to ssh-host:
+press `<Esc>` to escape
+type `!!cat ~/.bashrc&` will copy execute result into clipboard
