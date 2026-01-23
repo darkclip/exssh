@@ -1,6 +1,6 @@
 [project]
 name = "exssh"
-version = "0.1.2"
+version = "0.1.3"
 description = "Provide automation capability for any ssh client."
 keywords = ["ssh", "mosh", "zssh", "automation", "expect"]
 license = "MIT"

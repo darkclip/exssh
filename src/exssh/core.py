@@ -55,7 +55,7 @@ class PtyInteract:
         command_end: str = '',
         debug: bool = False,
     ) -> None:
-        self.prompt = r'[$#>/%:](\s*|\s*\x1b.*)$'
+        self.prompt = r'([$#>/%:]\s*)$|(\s*\x1b\[.*)$'
 
         print(f'Connecting by: {command}')
         self.child = pexpect.spawn(command, timeout=timeout, encoding='utf8')
@@ -195,6 +195,7 @@ class PtyInteract:
         self.child.sendcontrol('c')
         self.child.sendline()
         self.child.sendline('exit')
+        self.child.sendline('quit')
         self.child.expect(
             [
                 pexpect.TIMEOUT,
